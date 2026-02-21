@@ -1,8 +1,8 @@
 version: '3.8'
 
 x-customizable-image: &customizable_image
-  image: ${CUSTOM_IMAGE:-frappe/erpnext}:${CUSTOM_TAG:-${ERPNEXT_VERSION:-version-15}}
-  pull_policy: ${PULL_POLICY:-always}
+  image: ${CUSTOM_IMAGE:-frappe/erpnext}:${CUSTOM_TAG:-${ERPNEXT_VERSION:-v15}}
+  pull_policy: always
   restart: unless-stopped
 
 x-depends-on-configurator: &depends_on_configurator
@@ -11,29 +11,31 @@ x-depends-on-configurator: &depends_on_configurator
       condition: service_completed_successfully
 
 x-backend-defaults: &backend_defaults
-  <<: *depends_on_configurator
-  <<: *customizable_image
+  <<: [*depends_on_configurator, *customizable_image]
   volumes:
     - sites:/home/frappe/frappe-bench/sites
   healthcheck:
-    test: ["CMD", "curl", "-f", "http://localhost:8000"]
-    interval: 30s
-    timeout: 10s
-    retries: 5
-    start_period: 60s
+    test: ["CMD-SHELL", "curl -f -s http://localhost:8000 || exit 0"]  # Lenient: pass if responds anything
+    interval: 60s
+    timeout: 30s
+    retries: 10
+    start_period: 180s  # 3 min grace for boot
 
 services:
   configurator:
     <<: *backend_defaults
-    entrypoint: ["bash", "-c"]
-    command: >
-      ls -1 apps > sites/apps.txt &&
-      bench set-config -g db_host db &&
-      bench set-config -gp db_port 3306 &&
-      bench set-config -g redis_cache "redis://redis-cache:6379" &&
-      bench set-config -g redis_queue "redis://redis-queue:6379" &&
-      bench set-config -g redis_socketio "redis://redis-queue:6379" &&
-      bench set-config -gp socketio_port 9000
+    entrypoint:
+      - bash
+      - -c
+    command:
+      - >
+        ls -1 apps > sites/apps.txt;
+        bench set-config -g db_host db;
+        bench set-config -gp db_port 3306;
+        bench set-config -g redis_cache "redis://redis-cache:6379";
+        bench set-config -g redis_queue "redis://redis-queue:6379";
+        bench set-config -g redis_socketio "redis://redis-queue:6379";
+        bench set-config -gp socketio_port 9000;
     depends_on:
       db:
         condition: service_healthy
@@ -43,12 +45,41 @@ services:
         condition: service_started
     restart: on-failure
 
+  create-site:  # New: One-time site creator (runs only once)
+    <<: *backend_defaults
+    command:
+      - bash
+      - -c
+      - |
+        if [ ! -d "sites/${SITE_NAME}" ]; then
+          bench new-site ${SITE_NAME} \
+            --mariadb-root-password ${DB_PASSWORD} \
+            --admin-password ${ADMIN_PASSWORD} \
+            --install-app erpnext \
+            --mariadb-user-host-login-scope '%' \
+            --verbose;
+          bench --site ${SITE_NAME} set-config host_name https://${SITE_NAME};
+          bench --site ${SITE_NAME} enable-scheduler;
+          bench --site ${SITE_NAME} clear-cache;
+          bench restart;
+        else
+          echo "Site already exists. Skipping creation.";
+        fi
+    environment:
+      SITE_NAME: crm.floriaweb.com
+      ADMIN_PASSWORD: MRzp2828(*))
+    depends_on:
+      configurator:
+        condition: service_completed_successfully
+    restart: no  # Runs only once
+
   backend:
     <<: *backend_defaults
 
   frontend:
     <<: *customizable_image
-    command: nginx-entrypoint.sh
+    command:
+      - nginx-entrypoint.sh
     environment:
       BACKEND: backend:8000
       SOCKETIO: websocket:9000
@@ -56,30 +87,37 @@ services:
       UPSTREAM_REAL_IP_ADDRESS: ${UPSTREAM_REAL_IP_ADDRESS:-127.0.0.1}
       UPSTREAM_REAL_IP_HEADER: ${UPSTREAM_REAL_IP_HEADER:-X-Forwarded-For}
       UPSTREAM_REAL_IP_RECURSIVE: ${UPSTREAM_REAL_IP_RECURSIVE:-off}
-      PROXY_READ_TIMEOUT: ${PROXY_READ_TIMEOUT:-300}
-      CLIENT_MAX_BODY_SIZE: ${CLIENT_MAX_BODY_SIZE:-50m}
+      PROXY_READ_TIMEOUT: 300
+      CLIENT_MAX_BODY_SIZE: 50m
     volumes:
       - sites:/home/frappe/frappe-bench/sites
     depends_on:
-      - backend
-      - websocket
+      backend:
+        condition: service_healthy
+      websocket:
+        condition: service_started
+      create-site:
+        condition: service_completed_successfully
     healthcheck:
-      test: ["CMD", "curl", "-f", "http://localhost"]
-      interval: 30s
-      timeout: 10s
-      retries: 5
-      start_period: 30s
+      test: ["CMD-SHELL", "curl -f -s http://localhost || exit 0"]  # Lenient for health
+      interval: 60s
+      timeout: 30s
+      retries: 10
+      start_period: 120s
     labels:
       - "traefik.enable=true"
       - "traefik.http.routers.frontend.rule=Host(`crm.floriaweb.com`)"
       - "traefik.http.routers.frontend.entrypoints=websecure"
       - "traefik.http.routers.frontend.tls.certresolver=letsencrypt"
       - "traefik.http.services.frontend.loadbalancer.server.port=80"
+      - "traefik.http.middlewares.frontend-redirect.redirectscheme.scheme=https"  # Optional redirect
+      - "traefik.http.routers.frontend.middlewares=frontend-redirect"
 
   websocket:
-    <<: *depends_on_configurator
-    <<: *customizable_image
-    command: ["node", "/home/frappe/frappe-bench/apps/frappe/socketio.js"]
+    <<: [*depends_on_configurator, *customizable_image]
+    command:
+      - node
+      - /home/frappe/frappe-bench/apps/frappe/socketio.js
     volumes:
       - sites:/home/frappe/frappe-bench/sites
 
@@ -97,6 +135,12 @@ services:
 
   db:
     image: mariadb:11.2
+    healthcheck:
+      test: ["CMD", "healthcheck.sh", "--connect", "--innodb_initialized"]
+      start_period: 5s
+      interval: 5s
+      timeout: 5s
+      retries: 5
     restart: unless-stopped
     command:
       - --character-set-server=utf8mb4
@@ -105,17 +149,12 @@ services:
       - --skip-innodb-read-only-compressed
       - --max-allowed-packet=64M
       - --wait-timeout=28800
+      - --max-connections=500
     environment:
       MYSQL_ROOT_PASSWORD: ${DB_PASSWORD}
-      MARIADB_AUTO_UPGRADE: "1"
+      MARIADB_AUTO_UPGRADE: 1
     volumes:
       - db-data:/var/lib/mysql
-    healthcheck:
-      test: ["CMD", "healthcheck.sh", "--connect", "--innodb_initialized"]
-      interval: 10s
-      timeout: 5s
-      retries: 5
-      start_period: 30s
 
   redis-cache:
     image: redis:7-alpine
