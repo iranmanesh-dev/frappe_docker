@@ -15,6 +15,13 @@ x-backend-defaults: &backend_defaults
   <<: *customizable_image
   volumes:
     - sites:/home/frappe/frappe-bench/sites
+  environment:
+    DB_HOST: db
+    DB_PORT: 3306
+    REDIS_CACHE: redis://redis-cache:6379
+    REDIS_QUEUE: redis://redis-queue:6379
+    REDIS_SOCKETIO: redis://redis-queue:6379
+    SOCKETIO_PORT: 9000
   healthcheck:
     test: ["CMD-SHELL", "curl -f -s http://localhost:8000 || exit 0"]
     interval: 60s
@@ -33,14 +40,33 @@ services:
       echo "=== Configurator started ==="
       echo "Creating apps.txt..."
       ls -1 apps > sites/apps.txt || echo "Failed to list apps"
-      echo "Setting database configuration..."
-      bench set-config -g db_host db || echo "Failed to set db_host"
-      bench set-config -gp db_port 3306 || echo "Failed to set db_port"
-      echo "Setting redis configuration..."
-      bench set-config -g redis_cache "redis://redis-cache:6379" || echo "Failed to set redis_cache"
-      bench set-config -g redis_queue "redis://redis-queue:6379" || echo "Failed to set redis_queue"
-      bench set-config -g redis_socketio "redis://redis-queue:6379" || echo "Failed to set redis_socketio"
-      bench set-config -gp socketio_port 9000 || echo "Failed to set socketio_port"
+      echo "Setting common site config..."
+      
+      # Set database configuration in common_site_config.json
+      cat > /home/frappe/frappe-bench/sites/common_site_config.json << 'EOF'
+      {
+        "db_host": "db",
+        "db_port": 3306,
+        "redis_cache": "redis://redis-cache:6379",
+        "redis_queue": "redis://redis-queue:6379",
+        "redis_socketio": "redis://redis-queue:6379",
+        "socketio_port": 9000,
+        "developer_mode": 1,
+        "allow_unsafe_ssl": true
+      }
+      EOF
+      
+      echo "Common site config created:"
+      cat /home/frappe/frappe-bench/sites/common_site_config.json
+      
+      # Also set via bench commands as backup
+      bench set-config -g db_host db
+      bench set-config -gp db_port 3306
+      bench set-config -g redis_cache "redis://redis-cache:6379"
+      bench set-config -g redis_queue "redis://redis-queue:6379"
+      bench set-config -g redis_socketio "redis://redis-queue:6379"
+      bench set-config -gp socketio_port 9000
+      
       echo "=== Configurator completed successfully ==="
     depends_on:
       db:
@@ -60,23 +86,33 @@ services:
         set -ex
         echo "=== Create-site started ==="
         echo "Current directory: $(pwd)"
-        echo "Listing home directory:"
-        ls -la /home/frappe/
-        echo "Listing frappe-bench directory:"
-        ls -la /home/frappe/frappe-bench/ || echo "frappe-bench directory not found"
-        echo "Listing sites directory:"
-        ls -la sites || echo "sites directory not found or empty"
         
         # Wait for configurator to fully complete
         echo "Waiting 10 seconds for configurator to settle..."
         sleep 10
         
+        # Check if common_site_config.json exists and has correct db_host
+        echo "Checking common_site_config.json:"
+        cat /home/frappe/frappe-bench/sites/common_site_config.json || echo "common_site_config.json not found"
+        
         # Check if site already exists
         if [ -d "sites/${SITE_NAME}" ]; then
-          echo "Site ${SITE_NAME} already exists. Skipping creation."
-          bench --site ${SITE_NAME} list-apps || echo "Could not list apps"
+          echo "Site ${SITE_NAME} already exists. Running migration..."
+          
+          # First, set the correct database host for the site
+          echo "Setting database host for existing site..."
+          bench --site ${SITE_NAME} set-config db_host db
+          bench --site ${SITE_NAME} set-config db_port 3306
+          
+          # Test database connection
+          echo "Testing database connection..."
+          bench --site ${SITE_NAME} console --execute "print('Database connection successful')" || echo "Database connection failed"
+          
+          # Run migration
+          echo "Running migration..."
           bench --site ${SITE_NAME} migrate || echo "Migration failed"
-          echo "=== Site already exists, exiting ==="
+          
+          echo "=== Site already exists, completed ==="
           exit 0
         fi
         
@@ -86,13 +122,15 @@ services:
         echo "Available apps in bench:"
         ls -la apps/ || echo "apps directory not found"
         
-        # Test database connection
+        # Test database connection before creating site
         echo "Testing database connection..."
-        mysql -h db -u root -p${DB_PASSWORD} -e "SELECT 1" || echo "Database connection failed"
+        mysql -h db -u root -p${DB_PASSWORD} -e "SELECT 1" || { echo "Database connection failed"; exit 1; }
         
-        # Create the site with maximum verbosity and capture all output
+        # Create the site with explicit database host
         echo "Running bench new-site command..."
         bench new-site ${SITE_NAME} \
+          --db-host db \
+          --db-port 3306 \
           --mariadb-root-password "${DB_PASSWORD}" \
           --admin-password "${ADMIN_PASSWORD}" \
           --install-app erpnext \
@@ -108,23 +146,27 @@ services:
           exit 1
         fi
         
+        # Verify site was created
+        echo "Verifying site creation:"
+        ls -la sites/${SITE_NAME}/ || { echo "Site directory not found"; exit 1; }
+        
         # Configure the site
         echo "Configuring site..."
-        bench --site ${SITE_NAME} set-config developer_mode 1 || echo "Failed to set developer_mode"
-        bench --site ${SITE_NAME} set-config host_name "https://${SITE_NAME}" || echo "Failed to set host_name"
-        bench --site ${SITE_NAME} enable-scheduler || echo "Failed to enable scheduler"
-        bench --site ${SITE_NAME} clear-cache || echo "Failed to clear cache"
+        bench --site ${SITE_NAME} set-config developer_mode 1
+        bench --site ${SITE_NAME} set-config host_name "https://${SITE_NAME}"
+        bench --site ${SITE_NAME} enable-scheduler
+        bench --site ${SITE_NAME} clear-cache
         
         # Verify installation
         echo "Installed apps on site:"
-        bench --site ${SITE_NAME} list-apps || echo "Failed to list apps"
+        bench --site ${SITE_NAME} list-apps
         
         echo "=== Site creation completed successfully ==="
     environment:
       SITE_NAME: crm.floriaweb.com
       ADMIN_PASSWORD: '${ADMIN_PASSWORD}'
       DB_PASSWORD: '${DB_PASSWORD}'
-      MYSQL_PWD: '${DB_PASSWORD}'  # For mysql client
+      MYSQL_PWD: '${DB_PASSWORD}'
     depends_on:
       configurator:
         condition: service_completed_successfully
@@ -217,7 +259,7 @@ services:
         condition: service_completed_successfully
 
   db:
-    image: mariadb:10.11
+    image: mariadb:10.6  # Using 10.6 for better compatibility
     restart: unless-stopped
     command:
       - --character-set-server=utf8mb4
@@ -227,9 +269,7 @@ services:
       - --max-allowed-packet=64M
       - --wait-timeout=28800
       - --max-connections=500
-      - --log-bin=mysql-bin  # Enable binary logging for replication
-      - --binlog-format=ROW   # Use row-based replication
-      - --server-id=1         # Server ID for replication
+      - --bind-address=0.0.0.0
     environment:
       MYSQL_ROOT_PASSWORD: '${DB_PASSWORD}'
       MARIADB_AUTO_UPGRADE: "1"
