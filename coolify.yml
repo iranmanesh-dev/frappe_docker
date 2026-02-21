@@ -40,7 +40,6 @@ services:
       echo "=== Configurator started ==="
       echo "Creating apps.txt..."
       ls -1 apps > sites/apps.txt || echo "Failed to list apps"
-      echo "Setting common site config..."
       
       # Set database configuration in common_site_config.json
       cat > /home/frappe/frappe-bench/sites/common_site_config.json << 'EOF'
@@ -91,7 +90,7 @@ services:
         echo "Waiting 10 seconds for configurator to settle..."
         sleep 10
         
-        # Check if common_site_config.json exists and has correct db_host
+        # Check if common_site_config.json exists
         echo "Checking common_site_config.json:"
         cat /home/frappe/frappe-bench/sites/common_site_config.json || echo "common_site_config.json not found"
         
@@ -99,14 +98,14 @@ services:
         if [ -d "sites/${SITE_NAME}" ]; then
           echo "Site ${SITE_NAME} already exists. Running migration..."
           
-          # First, set the correct database host for the site
+          # Set the correct database host for the site
           echo "Setting database host for existing site..."
           bench --site ${SITE_NAME} set-config db_host db
           bench --site ${SITE_NAME} set-config db_port 3306
           
           # Test database connection
           echo "Testing database connection..."
-          bench --site ${SITE_NAME} console --execute "print('Database connection successful')" || echo "Database connection failed"
+          mysql -h db -u root -p${DB_PASSWORD} -e "SELECT 1" || { echo "Database connection failed"; exit 1; }
           
           # Run migration
           echo "Running migration..."
@@ -259,27 +258,32 @@ services:
         condition: service_completed_successfully
 
   db:
-    image: mariadb:10.6  # Using 10.6 for better compatibility
+    image: mariadb:10.11
     restart: unless-stopped
-    command:
+    command: 
       - --character-set-server=utf8mb4
       - --collation-server=utf8mb4_unicode_ci
       - --skip-character-set-client-handshake
       - --skip-innodb-read-only-compressed
-      - --max-allowed-packet=64M
+      - --max-allowed-packet=256M
       - --wait-timeout=28800
-      - --max-connections=500
+      - --max-connections=1000
       - --bind-address=0.0.0.0
+      - --skip-name-resolve
     environment:
       MYSQL_ROOT_PASSWORD: '${DB_PASSWORD}'
+      MYSQL_DATABASE: 'frappe'
+      MYSQL_USER: 'frappe'
+      MYSQL_PASSWORD: '${DB_PASSWORD}'
       MARIADB_AUTO_UPGRADE: "1"
+      MARIADB_DISABLE_UPGRADE_BACKUP: "1"
     volumes:
       - db-data:/var/lib/mysql
     healthcheck:
-      test: ["CMD", "healthcheck.sh", "--connect", "--innodb_initialized"]
-      interval: 10s
+      test: ["CMD", "mysqladmin", "ping", "-h", "localhost", "-u", "root", "-p${DB_PASSWORD}"]
+      interval: 5s
       timeout: 5s
-      retries: 5
+      retries: 20
       start_period: 30s
 
   redis-cache:
@@ -308,3 +312,7 @@ volumes:
   sites:
   db-data:
   redis-queue-data:
+
+networks:
+  default:
+    driver: bridge
