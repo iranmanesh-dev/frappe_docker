@@ -4,7 +4,9 @@
 # Optional: ERPNEXT_VERSION, UPSTREAM_REAL_IP_*, PROXY_READ_TIMEOUT, CLIENT_MAX_BODY_SIZE
 #
 # IMPORTANT: Do NOT link a Coolify "Database" resource to this app. The `db` service in this
-# compose is the only database; Coolify-injected DB credentials cause "Access denied" errors.
+# compose is the only database. If you see "Access denied for user '_d5b10ad8e9df89d0'":
+# 1) In Coolify, unlink/remove any Database resource from this application.
+# 2) Redeploy so configurator runs and patches site_config.json to use root + DB_PASSWORD.
 
 x-customizable-image: &customizable_image
   image: ${CUSTOM_IMAGE:-frappe/erpnext}:${CUSTOM_TAG:-${ERPNEXT_VERSION:-v15}}
@@ -68,8 +70,23 @@ services:
         bench set-config -g redis_queue "redis://redis-queue:6379"
         bench set-config -g redis_socketio "redis://redis-queue:6379"
         bench set-config -gp socketio_port 9000
-        if [ -d "sites/${SITE_NAME}" ]; then
-          echo "Updating existing site config for ${SITE_NAME}..."
+        # Force site_config.json to use compose DB credentials (overrides Coolify-injected user)
+        if [ -f "sites/${SITE_NAME}/site_config.json" ]; then
+          echo "Patching site_config.json for ${SITE_NAME} (db_user=root)..."
+          python3 -c "
+          import json, os
+          path = os.path.join('sites', os.environ['SITE_NAME'], 'site_config.json')
+          with open(path) as f: c = json.load(f)
+          c['db_host'] = 'db'
+          c['db_port'] = 3306
+          c['db_user'] = 'root'
+          c['db_password'] = os.environ['DB_PASSWORD']
+          c['redis_cache'] = 'redis://redis-cache:6379'
+          c['redis_queue'] = 'redis://redis-queue:6379'
+          c['redis_socketio'] = 'redis://redis-queue:6379'
+          with open(path, 'w') as f: json.dump(c, f, indent=1)
+          print('Patched:', path)
+          "
           bench --site "${SITE_NAME}" set-config db_host db
           bench --site "${SITE_NAME}" set-config db_port 3306
           bench --site "${SITE_NAME}" set-config db_user root
@@ -104,7 +121,20 @@ services:
         echo "Checking common_site_config.json:"
         cat /home/frappe/frappe-bench/sites/common_site_config.json || true
         if [ -d "sites/${SITE_NAME}" ]; then
-          echo "Site ${SITE_NAME} already exists. Updating config and running migration..."
+          echo "Site ${SITE_NAME} already exists. Patching site_config.json and running migration..."
+          if [ -f "sites/${SITE_NAME}/site_config.json" ]; then
+            python3 -c "
+            import json, os
+            path = os.path.join('sites', os.environ['SITE_NAME'], 'site_config.json')
+            with open(path) as f: c = json.load(f)
+            c['db_host'], c['db_port'] = 'db', 3306
+            c['db_user'], c['db_password'] = 'root', os.environ['DB_PASSWORD']
+            c['redis_cache'] = 'redis://redis-cache:6379'
+            c['redis_queue'] = c['redis_socketio'] = 'redis://redis-queue:6379'
+            with open(path, 'w') as f: json.dump(c, f, indent=1)
+            print('Patched', path)
+            "
+          fi
           bench --site ${SITE_NAME} set-config db_host db
           bench --site ${SITE_NAME} set-config db_port 3306
           bench --site ${SITE_NAME} set-config db_user root
