@@ -34,8 +34,10 @@ services:
     depends_on:
       db:
         condition: service_healthy
-      - redis-cache
-      - redis-queue
+      redis-cache:
+        condition: service_started
+      redis-queue:
+        condition: service_started
     restart: on-failure
 
   backend:
@@ -61,13 +63,13 @@ services:
     depends_on:
       - backend
       - websocket
-    # Optional: Add Traefik labels if Coolify doesn't auto-detect (Coolify usually handles this)
     labels:
       - "traefik.enable=true"
       - "traefik.http.services.frontend.loadbalancer.server.port=80"
 
   websocket:
-    <<: [*depends_on_configurator, *customizable_image]
+    <<: *depends_on_configurator
+    <<: *customizable_image
     platform: linux/amd64
     command:
       - node
