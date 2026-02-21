@@ -51,7 +51,11 @@ services:
         "redis_socketio": "redis://redis-queue:6379",
         "socketio_port": 9000,
         "developer_mode": 1,
-        "allow_unsafe_ssl": true
+        "allow_unsafe_ssl": true,
+        "celery": {
+          "broker_url": "redis://redis-queue:6379",
+          "result_backend": "redis://redis-queue:6379"
+        }
       }
       EOF
       
@@ -71,9 +75,9 @@ services:
       db:
         condition: service_healthy
       redis-cache:
-        condition: service_started
+        condition: service_healthy
       redis-queue:
-        condition: service_started
+        condition: service_healthy
     restart: "no"
 
   create-site:
@@ -102,6 +106,9 @@ services:
           echo "Setting database host for existing site..."
           bench --site ${SITE_NAME} set-config db_host db
           bench --site ${SITE_NAME} set-config db_port 3306
+          bench --site ${SITE_NAME} set-config redis_cache "redis://redis-cache:6379"
+          bench --site ${SITE_NAME} set-config redis_queue "redis://redis-queue:6379"
+          bench --site ${SITE_NAME} set-config redis_socketio "redis://redis-queue:6379"
           
           # Test database connection
           echo "Testing database connection..."
@@ -153,6 +160,9 @@ services:
         echo "Configuring site..."
         bench --site ${SITE_NAME} set-config developer_mode 1
         bench --site ${SITE_NAME} set-config host_name "https://${SITE_NAME}"
+        bench --site ${SITE_NAME} set-config redis_cache "redis://redis-cache:6379"
+        bench --site ${SITE_NAME} set-config redis_queue "redis://redis-queue:6379"
+        bench --site ${SITE_NAME} set-config redis_socketio "redis://redis-queue:6379"
         bench --site ${SITE_NAME} enable-scheduler
         bench --site ${SITE_NAME} clear-cache
         
@@ -171,6 +181,10 @@ services:
         condition: service_completed_successfully
       db:
         condition: service_healthy
+      redis-cache:
+        condition: service_healthy
+      redis-queue:
+        condition: service_healthy
     restart: "no"
 
   backend:
@@ -180,6 +194,10 @@ services:
         condition: service_completed_successfully
       create-site:
         condition: service_completed_successfully
+      redis-cache:
+        condition: service_healthy
+      redis-queue:
+        condition: service_healthy
 
   frontend:
     <<: *customizable_image
