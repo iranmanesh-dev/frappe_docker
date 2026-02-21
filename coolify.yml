@@ -1,3 +1,4 @@
+# Frappe ERPNext on Coolify - Fixed compose
 version: '3.8'
 
 x-customizable-image: &customizable_image
@@ -17,11 +18,11 @@ x-backend-defaults: &backend_defaults
     - sites:/home/frappe/frappe-bench/sites
   environment:
     DB_HOST: db
-    DB_PORT: 3306
+    DB_PORT: "3306"
     REDIS_CACHE: redis://redis-cache:6379
     REDIS_QUEUE: redis://redis-queue:6379
     REDIS_SOCKETIO: redis://redis-queue:6379
-    SOCKETIO_PORT: 9000
+    SOCKETIO_PORT: "9000"
   healthcheck:
     test: ["CMD-SHELL", "curl -f -s http://localhost:8000 || exit 0"]
     interval: 60s
@@ -32,45 +33,46 @@ x-backend-defaults: &backend_defaults
 services:
   configurator:
     <<: *backend_defaults
-    entrypoint:
-      - bash
-      - -c
-    command: |
-      set -ex
-      echo "=== Configurator started ==="
-      echo "Creating apps.txt..."
-      ls -1 apps > sites/apps.txt || echo "Failed to list apps"
-      
-      # Create proper common_site_config.json with all settings
-      cat > /home/frappe/frappe-bench/sites/common_site_config.json << 'EOF'
-      {
-        "db_host": "db",
-        "db_port": 3306,
-        "redis_cache": "redis://redis-cache:6379",
-        "redis_queue": "redis://redis-queue:6379",
-        "redis_socketio": "redis://redis-queue:6379",
-        "socketio_port": 9000,
-        "developer_mode": 1,
-        "allow_unsafe_ssl": true,
-        "celery": {
-          "broker_url": "redis://redis-queue:6379",
-          "result_backend": "redis://redis-queue:6379"
+    entrypoint: ["bash", "-c"]
+    command:
+      - |
+        set -ex
+        echo "=== Configurator started ==="
+        cat > /home/frappe/frappe-bench/sites/common_site_config.json << 'COMMON_EOF'
+        {
+          "db_host": "db",
+          "db_port": 3306,
+          "redis_cache": "redis://redis-cache:6379",
+          "redis_queue": "redis://redis-queue:6379",
+          "redis_socketio": "redis://redis-queue:6379",
+          "socketio_port": 9000,
+          "developer_mode": 1,
+          "allow_unsafe_ssl": true,
+          "celery": {
+            "broker_url": "redis://redis-queue:6379",
+            "result_backend": "redis://redis-queue:6379"
+          }
         }
-      }
-      EOF
-      
-      echo "Common site config created:"
-      cat /home/frappe/frappe-bench/sites/common_site_config.json
-      
-      # Also set via bench commands as backup
-      bench set-config -g db_host db
-      bench set-config -gp db_port 3306
-      bench set-config -g redis_cache "redis://redis-cache:6379"
-      bench set-config -g redis_queue "redis://redis-queue:6379"
-      bench set-config -g redis_socketio "redis://redis-queue:6379"
-      bench set-config -gp socketio_port 9000
-      
-      echo "=== Configurator completed successfully ==="
+        COMMON_EOF
+        echo "Common site config:"
+        cat /home/frappe/frappe-bench/sites/common_site_config.json
+        bench set-config -g db_host db
+        bench set-config -gp db_port 3306
+        bench set-config -g redis_cache "redis://redis-cache:6379"
+        bench set-config -g redis_queue "redis://redis-queue:6379"
+        bench set-config -g redis_socketio "redis://redis-queue:6379"
+        bench set-config -gp socketio_port 9000
+        if [ -d "sites/${SITE_NAME}" ]; then
+          echo "Updating existing site config for ${SITE_NAME}..."
+          bench --site "${SITE_NAME}" set-config db_host db
+          bench --site "${SITE_NAME}" set-config db_port 3306
+          bench --site "${SITE_NAME}" set-config redis_cache "redis://redis-cache:6379"
+          bench --site "${SITE_NAME}" set-config redis_queue "redis://redis-queue:6379"
+          bench --site "${SITE_NAME}" set-config redis_socketio "redis://redis-queue:6379"
+        fi
+        echo "=== Configurator completed ==="
+    environment:
+      SITE_NAME: ${SITE_NAME}
     depends_on:
       db:
         condition: service_healthy
@@ -82,58 +84,29 @@ services:
 
   create-site:
     <<: *backend_defaults
+    entrypoint: ["bash", "-c"]
     command:
-      - bash
-      - -c
       - |
         set -ex
         echo "=== Create-site started ==="
-        echo "Current directory: $(pwd)"
-        
-        # Wait for configurator to fully complete
-        echo "Waiting 10 seconds for configurator to settle..."
         sleep 10
-        
-        # Check if common_site_config.json exists
         echo "Checking common_site_config.json:"
-        cat /home/frappe/frappe-bench/sites/common_site_config.json || echo "common_site_config.json not found"
-        
-        # Check if site already exists
+        cat /home/frappe/frappe-bench/sites/common_site_config.json || true
         if [ -d "sites/${SITE_NAME}" ]; then
-          echo "Site ${SITE_NAME} already exists. Running migration..."
-          
-          # Set the correct database host for the site
-          echo "Setting database host for existing site..."
+          echo "Site ${SITE_NAME} already exists. Updating config and running migration..."
           bench --site ${SITE_NAME} set-config db_host db
           bench --site ${SITE_NAME} set-config db_port 3306
           bench --site ${SITE_NAME} set-config redis_cache "redis://redis-cache:6379"
           bench --site ${SITE_NAME} set-config redis_queue "redis://redis-queue:6379"
           bench --site ${SITE_NAME} set-config redis_socketio "redis://redis-queue:6379"
-          
-          # Test database connection
-          echo "Testing database connection..."
-          mysql -h db -u root -p${DB_PASSWORD} -e "SELECT 1" || { echo "Database connection failed"; exit 1; }
-          
-          # Run migration
-          echo "Running migration..."
-          bench --site ${SITE_NAME} migrate || echo "Migration failed"
-          
-          echo "=== Site already exists, completed ==="
+          mysql -h db -u root -p"${DB_PASSWORD}" -e "SELECT 1" || { echo "DB connection failed"; exit 1; }
+          bench --site ${SITE_NAME} migrate || echo "Migration warning"
+          echo "=== Site exists, done ==="
           exit 0
         fi
-        
         echo "Creating new site ${SITE_NAME}..."
-        
-        # Check available apps
-        echo "Available apps in bench:"
-        ls -la apps/ || echo "apps directory not found"
-        
-        # Test database connection before creating site
-        echo "Testing database connection..."
-        mysql -h db -u root -p${DB_PASSWORD} -e "SELECT 1" || { echo "Database connection failed"; exit 1; }
-        
-        # Create the site with explicit database host
-        echo "Running bench new-site command..."
+        ls -la apps/ || true
+        mysql -h db -u root -p"${DB_PASSWORD}" -e "SELECT 1" || { echo "DB connection failed"; exit 1; }
         bench new-site ${SITE_NAME} \
           --db-host db \
           --db-port 3306 \
@@ -142,22 +115,12 @@ services:
           --install-app erpnext \
           --force \
           --verbose 2>&1 | tee /tmp/site-creation.log
-        
-        # Check if site creation was successful
         if [ $? -ne 0 ]; then
-          echo "ERROR: bench new-site failed with exit code $?"
-          echo "Last 50 lines of site creation log:"
+          echo "Last 50 lines of log:"
           tail -50 /tmp/site-creation.log
-          echo "=== Create-site failed ==="
           exit 1
         fi
-        
-        # Verify site was created
-        echo "Verifying site creation:"
-        ls -la sites/${SITE_NAME}/ || { echo "Site directory not found"; exit 1; }
-        
-        # Configure the site
-        echo "Configuring site..."
+        ls -la sites/${SITE_NAME}/ || { echo "Site dir not found"; exit 1; }
         bench --site ${SITE_NAME} set-config developer_mode 1
         bench --site ${SITE_NAME} set-config host_name "https://${SITE_NAME}"
         bench --site ${SITE_NAME} set-config redis_cache "redis://redis-cache:6379"
@@ -165,17 +128,13 @@ services:
         bench --site ${SITE_NAME} set-config redis_socketio "redis://redis-queue:6379"
         bench --site ${SITE_NAME} enable-scheduler
         bench --site ${SITE_NAME} clear-cache
-        
-        # Verify installation
-        echo "Installed apps on site:"
         bench --site ${SITE_NAME} list-apps
-        
-        echo "=== Site creation completed successfully ==="
+        echo "=== Site creation completed ==="
     environment:
-      SITE_NAME: crm.floriaweb.com
-      ADMIN_PASSWORD: '${ADMIN_PASSWORD}'
-      DB_PASSWORD: '${DB_PASSWORD}'
-      MYSQL_PWD: '${DB_PASSWORD}'
+      SITE_NAME: ${SITE_NAME}
+      ADMIN_PASSWORD: ${ADMIN_PASSWORD}
+      DB_PASSWORD: ${DB_PASSWORD}
+      MYSQL_PWD: ${DB_PASSWORD}
     depends_on:
       configurator:
         condition: service_completed_successfully
@@ -201,8 +160,13 @@ services:
 
   frontend:
     <<: *customizable_image
+    entrypoint: ["bash", "-c"]
     command:
-      - nginx-entrypoint.sh
+      - |
+        echo "Waiting for websocket:9000..."
+        until (echo >/dev/tcp/websocket/9000) 2>/dev/null; do sleep 2; done
+        echo "Websocket up, starting nginx..."
+        exec nginx-entrypoint.sh
     environment:
       BACKEND: backend:8000
       SOCKETIO: websocket:9000
@@ -237,12 +201,11 @@ services:
   websocket:
     <<: *depends_on_configurator
     <<: *customizable_image
-    command:
-      - node
-      - /home/frappe/frappe-bench/apps/frappe/socketio.js
+    command: ["node", "/home/frappe/frappe-bench/apps/frappe/socketio.js"]
     environment:
       REDIS_CACHE: redis://redis-cache:6379
       REDIS_QUEUE: redis://redis-queue:6379
+      REDIS_SOCKETIO: redis://redis-queue:6379
     volumes:
       - sites:/home/frappe/frappe-bench/sites
     depends_on:
@@ -257,10 +220,11 @@ services:
 
   queue-short:
     <<: *backend_defaults
-    command: bench worker --queue short,default
+    command: ["bench", "worker", "--queue", "short,default"]
     environment:
       REDIS_CACHE: redis://redis-cache:6379
       REDIS_QUEUE: redis://redis-queue:6379
+      REDIS_SOCKETIO: redis://redis-queue:6379
     depends_on:
       configurator:
         condition: service_completed_successfully
@@ -271,10 +235,11 @@ services:
 
   queue-long:
     <<: *backend_defaults
-    command: bench worker --queue long
+    command: ["bench", "worker", "--queue", "long"]
     environment:
       REDIS_CACHE: redis://redis-cache:6379
       REDIS_QUEUE: redis://redis-queue:6379
+      REDIS_SOCKETIO: redis://redis-queue:6379
     depends_on:
       configurator:
         condition: service_completed_successfully
@@ -285,10 +250,11 @@ services:
 
   scheduler:
     <<: *backend_defaults
-    command: bench schedule
+    command: ["bench", "schedule"]
     environment:
       REDIS_CACHE: redis://redis-cache:6379
       REDIS_QUEUE: redis://redis-queue:6379
+      REDIS_SOCKETIO: redis://redis-queue:6379
     depends_on:
       configurator:
         condition: service_completed_successfully
@@ -300,7 +266,7 @@ services:
   db:
     image: mariadb:10.11
     restart: unless-stopped
-    command: 
+    command:
       - --character-set-server=utf8mb4
       - --collation-server=utf8mb4_unicode_ci
       - --skip-character-set-client-handshake
@@ -311,10 +277,10 @@ services:
       - --bind-address=0.0.0.0
       - --skip-name-resolve
     environment:
-      MYSQL_ROOT_PASSWORD: '${DB_PASSWORD}'
-      MYSQL_DATABASE: 'frappe'
-      MYSQL_USER: 'frappe'
-      MYSQL_PASSWORD: '${DB_PASSWORD}'
+      MYSQL_ROOT_PASSWORD: ${DB_PASSWORD}
+      MYSQL_DATABASE: frappe
+      MYSQL_USER: frappe
+      MYSQL_PASSWORD: ${DB_PASSWORD}
       MARIADB_AUTO_UPGRADE: "1"
       MARIADB_DISABLE_UPGRADE_BACKUP: "1"
     volumes:
