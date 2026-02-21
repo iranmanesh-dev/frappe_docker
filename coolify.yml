@@ -1,5 +1,10 @@
-# Frappe ERPNext on Coolify - Fixed compose
-version: '3.8'
+# Frappe ERPNext - Coolify-compatible Compose
+#
+# Required env vars (set in Coolify or .env): SITE_NAME, ADMIN_PASSWORD, DB_PASSWORD
+# Optional: ERPNEXT_VERSION, UPSTREAM_REAL_IP_*, PROXY_READ_TIMEOUT, CLIENT_MAX_BODY_SIZE
+#
+# IMPORTANT: Do NOT link a Coolify "Database" resource to this app. The `db` service in this
+# compose is the only database; Coolify-injected DB credentials cause "Access denied" errors.
 
 x-customizable-image: &customizable_image
   image: ${CUSTOM_IMAGE:-frappe/erpnext}:${CUSTOM_TAG:-${ERPNEXT_VERSION:-v15}}
@@ -12,13 +17,14 @@ x-depends-on-configurator: &depends_on_configurator
       condition: service_completed_successfully
 
 x-backend-defaults: &backend_defaults
-  <<: *depends_on_configurator
-  <<: *customizable_image
+  <<: [*depends_on_configurator, *customizable_image]
   volumes:
     - sites:/home/frappe/frappe-bench/sites
   environment:
     DB_HOST: db
     DB_PORT: "3306"
+    DB_USERNAME: root
+    DB_PASSWORD: ${DB_PASSWORD}
     REDIS_CACHE: redis://redis-cache:6379
     REDIS_QUEUE: redis://redis-queue:6379
     REDIS_SOCKETIO: redis://redis-queue:6379
@@ -66,6 +72,8 @@ services:
           echo "Updating existing site config for ${SITE_NAME}..."
           bench --site "${SITE_NAME}" set-config db_host db
           bench --site "${SITE_NAME}" set-config db_port 3306
+          bench --site "${SITE_NAME}" set-config db_user root
+          bench --site "${SITE_NAME}" set-config db_password "${DB_PASSWORD}"
           bench --site "${SITE_NAME}" set-config redis_cache "redis://redis-cache:6379"
           bench --site "${SITE_NAME}" set-config redis_queue "redis://redis-queue:6379"
           bench --site "${SITE_NAME}" set-config redis_socketio "redis://redis-queue:6379"
@@ -73,6 +81,7 @@ services:
         echo "=== Configurator completed ==="
     environment:
       SITE_NAME: ${SITE_NAME}
+      DB_PASSWORD: ${DB_PASSWORD}
     depends_on:
       db:
         condition: service_healthy
@@ -80,6 +89,8 @@ services:
         condition: service_healthy
       redis-queue:
         condition: service_healthy
+    healthcheck:
+      disable: true
     restart: "no"
 
   create-site:
@@ -96,6 +107,8 @@ services:
           echo "Site ${SITE_NAME} already exists. Updating config and running migration..."
           bench --site ${SITE_NAME} set-config db_host db
           bench --site ${SITE_NAME} set-config db_port 3306
+          bench --site ${SITE_NAME} set-config db_user root
+          bench --site ${SITE_NAME} set-config db_password "${DB_PASSWORD}"
           bench --site ${SITE_NAME} set-config redis_cache "redis://redis-cache:6379"
           bench --site ${SITE_NAME} set-config redis_queue "redis://redis-queue:6379"
           bench --site ${SITE_NAME} set-config redis_socketio "redis://redis-queue:6379"
@@ -123,6 +136,8 @@ services:
         ls -la sites/${SITE_NAME}/ || { echo "Site dir not found"; exit 1; }
         bench --site ${SITE_NAME} set-config developer_mode 1
         bench --site ${SITE_NAME} set-config host_name "https://${SITE_NAME}"
+        bench --site ${SITE_NAME} set-config db_user root
+        bench --site ${SITE_NAME} set-config db_password "${DB_PASSWORD}"
         bench --site ${SITE_NAME} set-config redis_cache "redis://redis-cache:6379"
         bench --site ${SITE_NAME} set-config redis_queue "redis://redis-queue:6379"
         bench --site ${SITE_NAME} set-config redis_socketio "redis://redis-queue:6379"
@@ -144,6 +159,8 @@ services:
         condition: service_healthy
       redis-queue:
         condition: service_healthy
+    healthcheck:
+      disable: true
     restart: "no"
 
   backend:
@@ -199,8 +216,7 @@ services:
       - "traefik.http.services.frontend.loadbalancer.server.port=80"
 
   websocket:
-    <<: *depends_on_configurator
-    <<: *customizable_image
+    <<: [*depends_on_configurator, *customizable_image]
     command: ["node", "/home/frappe/frappe-bench/apps/frappe/socketio.js"]
     environment:
       REDIS_CACHE: redis://redis-cache:6379
