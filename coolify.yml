@@ -222,6 +222,9 @@ services:
     command:
       - node
       - /home/frappe/frappe-bench/apps/frappe/socketio.js
+    environment:
+      REDIS_CACHE: redis://redis-cache:6379
+      REDIS_QUEUE: redis://redis-queue:6379
     volumes:
       - sites:/home/frappe/frappe-bench/sites
     depends_on:
@@ -229,6 +232,10 @@ services:
         condition: service_completed_successfully
       create-site:
         condition: service_completed_successfully
+      redis-cache:
+        condition: service_started
+      redis-queue:
+        condition: service_started
 
   queue-short:
     <<: *backend_defaults
@@ -238,6 +245,8 @@ services:
         condition: service_completed_successfully
       create-site:
         condition: service_completed_successfully
+      redis-queue:
+        condition: service_started
 
   queue-long:
     <<: *backend_defaults
@@ -247,6 +256,8 @@ services:
         condition: service_completed_successfully
       create-site:
         condition: service_completed_successfully
+      redis-queue:
+        condition: service_started
 
   scheduler:
     <<: *backend_defaults
@@ -256,6 +267,8 @@ services:
         condition: service_completed_successfully
       create-site:
         condition: service_completed_successfully
+      redis-queue:
+        condition: service_started
 
   db:
     image: mariadb:10.11
