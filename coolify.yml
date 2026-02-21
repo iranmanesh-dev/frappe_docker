@@ -30,17 +30,18 @@ services:
       - -c
     command: |
       set -ex
+      echo "=== Configurator started ==="
       echo "Creating apps.txt..."
-      ls -1 apps > sites/apps.txt
+      ls -1 apps > sites/apps.txt || echo "Failed to list apps"
       echo "Setting database configuration..."
-      bench set-config -g db_host db
-      bench set-config -gp db_port 3306
+      bench set-config -g db_host db || echo "Failed to set db_host"
+      bench set-config -gp db_port 3306 || echo "Failed to set db_port"
       echo "Setting redis configuration..."
-      bench set-config -g redis_cache "redis://redis-cache:6379"
-      bench set-config -g redis_queue "redis://redis-queue:6379"
-      bench set-config -g redis_socketio "redis://redis-queue:6379"
-      bench set-config -gp socketio_port 9000
-      echo "Configurator completed successfully"
+      bench set-config -g redis_cache "redis://redis-cache:6379" || echo "Failed to set redis_cache"
+      bench set-config -g redis_queue "redis://redis-queue:6379" || echo "Failed to set redis_queue"
+      bench set-config -g redis_socketio "redis://redis-queue:6379" || echo "Failed to set redis_socketio"
+      bench set-config -gp socketio_port 9000 || echo "Failed to set socketio_port"
+      echo "=== Configurator completed successfully ==="
     depends_on:
       db:
         condition: service_healthy
@@ -48,7 +49,7 @@ services:
         condition: service_started
       redis-queue:
         condition: service_started
-    restart: on-failure
+    restart: "no"
 
   create-site:
     <<: *backend_defaults
@@ -57,53 +58,73 @@ services:
       - -c
       - |
         set -ex
+        echo "=== Create-site started ==="
         echo "Current directory: $(pwd)"
-        echo "Checking sites directory..."
-        ls -la sites || echo "sites dir missing"
+        echo "Listing home directory:"
+        ls -la /home/frappe/
+        echo "Listing frappe-bench directory:"
+        ls -la /home/frappe/frappe-bench/ || echo "frappe-bench directory not found"
+        echo "Listing sites directory:"
+        ls -la sites || echo "sites directory not found or empty"
         
-        # Wait a bit for configurator to fully complete
-        sleep 5
+        # Wait for configurator to fully complete
+        echo "Waiting 10 seconds for configurator to settle..."
+        sleep 10
         
-        if [ ! -d "sites/${SITE_NAME}" ]; then
-          echo "Creating new site ${SITE_NAME}..."
-          
-          # Check available apps
-          echo "Available apps:"
-          ls -1 apps || echo "No apps directory found"
-          
-          # Create the site with proper error handling
-          bench new-site ${SITE_NAME} \
-            --mariadb-root-password "${DB_PASSWORD}" \
-            --admin-password "${ADMIN_PASSWORD}" \
-            --install-app erpnext \
-            --force \
-            --verbose 2>&1 || { echo "bench new-site failed with exit code $?"; exit 1; }
-          
-          # Configure the site
-          echo "Configuring site..."
-          bench --site ${SITE_NAME} set-config developer_mode 1
-          bench --site ${SITE_NAME} set-config host_name "https://${SITE_NAME}"
-          bench --site ${SITE_NAME} enable-scheduler
-          bench --site ${SITE_NAME} clear-cache
-          
-          # Verify installation
-          echo "Installed apps on site:"
-          bench --site ${SITE_NAME} list-apps
-          
-          echo "Site creation completed successfully."
-        else
+        # Check if site already exists
+        if [ -d "sites/${SITE_NAME}" ]; then
           echo "Site ${SITE_NAME} already exists. Skipping creation."
-          # Run migrations if site exists
-          bench --site ${SITE_NAME} migrate || true
+          bench --site ${SITE_NAME} list-apps || echo "Could not list apps"
+          bench --site ${SITE_NAME} migrate || echo "Migration failed"
+          echo "=== Site already exists, exiting ==="
+          exit 0
         fi
         
-        # Final check
-        bench --site ${SITE_NAME} list-apps || echo "Warning: Could not list apps"
-        echo "Create-site process completed"
+        echo "Creating new site ${SITE_NAME}..."
+        
+        # Check available apps
+        echo "Available apps in bench:"
+        ls -la apps/ || echo "apps directory not found"
+        
+        # Test database connection
+        echo "Testing database connection..."
+        mysql -h db -u root -p${DB_PASSWORD} -e "SELECT 1" || echo "Database connection failed"
+        
+        # Create the site with maximum verbosity and capture all output
+        echo "Running bench new-site command..."
+        bench new-site ${SITE_NAME} \
+          --mariadb-root-password "${DB_PASSWORD}" \
+          --admin-password "${ADMIN_PASSWORD}" \
+          --install-app erpnext \
+          --force \
+          --verbose 2>&1 | tee /tmp/site-creation.log
+        
+        # Check if site creation was successful
+        if [ $? -ne 0 ]; then
+          echo "ERROR: bench new-site failed with exit code $?"
+          echo "Last 50 lines of site creation log:"
+          tail -50 /tmp/site-creation.log
+          echo "=== Create-site failed ==="
+          exit 1
+        fi
+        
+        # Configure the site
+        echo "Configuring site..."
+        bench --site ${SITE_NAME} set-config developer_mode 1 || echo "Failed to set developer_mode"
+        bench --site ${SITE_NAME} set-config host_name "https://${SITE_NAME}" || echo "Failed to set host_name"
+        bench --site ${SITE_NAME} enable-scheduler || echo "Failed to enable scheduler"
+        bench --site ${SITE_NAME} clear-cache || echo "Failed to clear cache"
+        
+        # Verify installation
+        echo "Installed apps on site:"
+        bench --site ${SITE_NAME} list-apps || echo "Failed to list apps"
+        
+        echo "=== Site creation completed successfully ==="
     environment:
       SITE_NAME: crm.floriaweb.com
       ADMIN_PASSWORD: '${ADMIN_PASSWORD}'
       DB_PASSWORD: '${DB_PASSWORD}'
+      MYSQL_PWD: '${DB_PASSWORD}'  # For mysql client
     depends_on:
       configurator:
         condition: service_completed_successfully
@@ -196,7 +217,7 @@ services:
         condition: service_completed_successfully
 
   db:
-    image: mariadb:10.11  # Using 10.11 instead of 11.2 for better compatibility
+    image: mariadb:10.11
     restart: unless-stopped
     command:
       - --character-set-server=utf8mb4
@@ -206,6 +227,9 @@ services:
       - --max-allowed-packet=64M
       - --wait-timeout=28800
       - --max-connections=500
+      - --log-bin=mysql-bin  # Enable binary logging for replication
+      - --binlog-format=ROW   # Use row-based replication
+      - --server-id=1         # Server ID for replication
     environment:
       MYSQL_ROOT_PASSWORD: '${DB_PASSWORD}'
       MARIADB_AUTO_UPGRADE: "1"
